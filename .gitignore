@@ -1,0 +1,9 @@
+outputs/
+checkpoints/
+.vscode/
+__pycache__/
+*.pyc
+assets/
+TRELLIS-image-large/
+README.md
+setup.py
