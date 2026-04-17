@@ -112,7 +112,9 @@ class MultiHeadAttention(nn.Module):
     
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, indices: Optional[torch.Tensor] = None, step_idx: int = 0, block_idx: int = 0, cache_idx: int = 0, **kwargs) -> torch.Tensor:
         B, L, C = x.shape
-        return_score = kwargs.get("return_score", False)
+        modify = kwargs.get("modify", False)
+        gate_attn = kwargs.get("gate_attn", False)
+        sa_use = kwargs.get("sa_use", False)
         if self._type == "self":
             if len(kwargs) > 0:
                 qkv = self.to_qkv(x)
@@ -136,13 +138,13 @@ class MultiHeadAttention(nn.Module):
                         q, k, v = qkv.unbind(dim=2)
                         q = self.q_rms_norm(q)
                         k = self.k_rms_norm(k)
-                        if return_score:
-                            h, score = scaled_dot_product_attention(q, k, v, return_score=True)
+                        if sa_use:
+                            h = scaled_dot_product_attention(q, k, v, modify=modify, gate_attn=gate_attn)
                         else:
                             h = scaled_dot_product_attention(q, k, v)
                     else:
-                        if return_score:
-                            h, score = scaled_dot_product_attention(qkv, return_score=True)
+                        if sa_use:
+                            h = scaled_dot_product_attention(qkv, modify=modify, gate_attn=gate_attn)
                         else:
                             h = scaled_dot_product_attention(qkv)
                 elif self.attn_mode == "windowed":
@@ -159,16 +161,10 @@ class MultiHeadAttention(nn.Module):
                     if self.qk_rms_norm:
                         q, k, v = qkv.unbind(dim=2)
                         q = self.q_rms_norm(q)
-                        k = self.k_rms_norm(k)
-                        if return_score:
-                            h, score = scaled_dot_product_attention(q, k, v, return_score=True)
-                        else:
-                            h = scaled_dot_product_attention(q, k, v)
+                        k = self.k_rms_norm(k) 
+                        h = scaled_dot_product_attention(q, k, v)
                     else:
-                        if return_score:
-                            h, score = scaled_dot_product_attention(qkv, return_score=True)
-                        else:
-                            h = scaled_dot_product_attention(qkv)
+                        h = scaled_dot_product_attention(qkv)
                 elif self.attn_mode == "windowed":
                     raise NotImplementedError("Windowed attention is not yet implemented")
         else:
@@ -182,18 +178,17 @@ class MultiHeadAttention(nn.Module):
                 q = self.q_rms_norm(q)
                 k, v = kv.unbind(dim=2)
                 k = self.k_rms_norm(k)
-                if return_score == True:
-                    h, score = scaled_dot_product_attention(q, k, v, return_score=True)
+                if modify or gate_attn:
+                    h = scaled_dot_product_attention(q, k, v, modify=modify, gate_attn=gate_attn)
                 else:
                     h = scaled_dot_product_attention(q, k, v)
             else:
-                if return_score == True:
-                    h, score = scaled_dot_product_attention(q, k, v, return_score=True)
+                if modify or gate_attn:
+                    h = scaled_dot_product_attention(q, k, v, modify=modify, gate_attn=gate_attn)
                 else:
                     h = scaled_dot_product_attention(q, k, v)
+
         h = h.reshape(B, L, -1)
         h = self.to_out(h)
-        if return_score == True:
-            return h, score
-        else:
-            return h
+
+        return h

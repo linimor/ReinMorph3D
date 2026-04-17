@@ -140,14 +140,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
         if len(kwargs) > 0:
             if kwargs["ss_tfsa_flag"]:
-                h_cur, score_cur = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, return_score=True, **kwargs)
-                h_prev, score_prev = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1, return_score=True, **kwargs)
-                # score_diff = score_prev - score_cur
-                # lambda_ = 5.0
-                # delta_alpha = 0.3 * torch.tanh(lambda_ * score_diff)
-                # delta_alpha = delta_alpha.unsqueeze(-1)  # [B, Lq, 1]
-                # tfsa_alpha = torch.clamp(kwargs["tfsa_alpha"] - delta_alpha, 0.0, 1.0)
-                h = feature_interp(h_cur, h_prev, kwargs["tfsa_alpha"], interp_mode="linear")
+                h = feature_interp(self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs), self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1, **kwargs), kwargs["tfsa_alpha"], interp_mode="linear")
             else:
                 h = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs)
         else:
@@ -159,17 +152,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
         if len(kwargs) > 0:
             if kwargs["ss_mca_flag"]:
-                h_src, score_src = self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, return_score=True)
-                h_tar, score_tar = self.cross_attn(x=h, context=kwargs["tar_cond"], step_idx=step_idx, block_idx=block_idx, return_score=True)
-                # print(score_src.shape) #[1, 4096]
-                # src_score = score_src          # [B, Lq]
-                # tar_score = score_tar          # [B, Lq]
-                # score_diff = tar_score - src_score   # [B, Lq]
-                # lambda_ = 5.0
-                # delta_alpha = 0.3 * torch.tanh(lambda_ * score_diff)   # [B, Lq]
-                # delta_alpha = delta_alpha.unsqueeze(-1)  # [B, Lq, 1]
-                # alpha = torch.clamp(kwargs["alpha"] - delta_alpha, 0.0, 1.0)
-                h = feature_interp(h_src, h_tar, kwargs["alpha"], interp_mode="linear")
+                h = feature_interp(self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, modify=kwargs["modify"], gate_attn=kwargs["gate_attn"]), self.cross_attn(x=h, context=kwargs["tar_cond"], step_idx=step_idx, block_idx=block_idx, modify=kwargs["modify"], gate_attn=kwargs["gate_attn"]), kwargs["alpha"], interp_mode="linear")
             else:
                 h = self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, **kwargs)
         else:

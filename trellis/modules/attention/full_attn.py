@@ -206,7 +206,7 @@ def modify_attn_score(
 #     out = attn_weight @ v
 #     out = out.permute(0, 2, 1, 3)   # [N, L, H, C]
 #     return out
-def _naive_sdpa(q, k, v, return_score=False, score_reduce="mean", lambda_scale=5.0, enable_truncation=True, modify=True):
+def _naive_sdpa(q, k, v, enable_truncation=False, modify=False):
     """
     Naive scaled dot product attention.
 
@@ -214,17 +214,11 @@ def _naive_sdpa(q, k, v, return_score=False, score_reduce="mean", lambda_scale=5
         q: [B, Lq, H, C]
         k: [B, Lk, H, C]
         v: [B, Lk, H, C]
-        return_score: whether to return fused token-level score
         score_reduce: how to reduce over key dimension, default "mean"
         lambda_scale: reserved scale factor for later use
 
     Returns:
-        if return_score is False:
-            out: [B, Lq, H, C]
-        else:
-            out: [B, Lq, H, C]
-            fused_score: [B, Lq]
-            head_weight: [B, Lq, H]
+        out: [B, Lq, H, C]
     """
     # -> [B, H, Lq/Lk, C]
     q = q.permute(0, 2, 1, 3)   # [B, H, Lq, C]
@@ -243,33 +237,9 @@ def _naive_sdpa(q, k, v, return_score=False, score_reduce="mean", lambda_scale=5
     out = attn_weight @ v
 
     # 先保留 per-head 输出，给后面算 head_weight 用
-    out_for_weight = out.permute(0, 2, 1, 3)   # [B, Lq, H, C]
+    out = out.permute(0, 2, 1, 3)   # [B, Lq, H, C]
 
-    # 最终正常输出
-    out = out_for_weight   # [B, Lq, H, C]
-    if not return_score:
-        return out
 
-    # -------------------------
-    # 1) 用每个 head 的输出强度生成 head_weight
-    #    [B, Lq, H]
-    # -------------------------
-    head_strength = out_for_weight.norm(dim=-1)
-    head_weight = torch.softmax(head_strength, dim=-1)
-
-    # -------------------------
-    # 2) 先把 attn_weight 在 key 维压成每个 query/head 一个分数
-    #    [B, H, Lq]
-    # -------------------------
-    if score_reduce == "mean":
-        score_per_head = attn_weight.mean(dim=-1)
-    elif score_reduce == "max":
-        score_per_head = attn_weight.max(dim=-1).values
-    else:
-        raise ValueError(f"Unsupported score_reduce: {score_reduce}")
-
-    # -> [B, Lq, H]
-    score_per_head = score_per_head.permute(0, 2, 1)
     if enable_truncation:
         # 1. 计算注意力信息熵 H = -sum(p * log(p))
         # 加上 1e-8 防止出现 log(0) 导致的 NaN 崩溃
@@ -290,9 +260,9 @@ def _naive_sdpa(q, k, v, return_score=False, score_reduce="mean", lambda_scale=5
         # 4. 执行暴力置零，依靠残差结构保护当前 3D 拓扑
         if mask is not None:
             out = out.masked_fill(mask, 0.0)
-    fused_score = (score_per_head * head_weight).sum(dim=-1)
 
-    return out, fused_score 
+
+    return out
 
 
 
@@ -338,7 +308,8 @@ def scaled_dot_product_attention(*args, **kwargs):
         2: ['q', 'kv'],
         3: ['q', 'k', 'v']
     }
-    return_score = kwargs.get("return_score", False)
+    modify = kwargs.get("modify", False)
+    gate_attn = kwargs.get("gate_attn", False)
     num_all_args = len(args) # + len(kwargs)
     assert num_all_args in arg_names_dict, f"Invalid number of arguments, got {num_all_args}, expected 1, 2, or 3"
     for key in arg_names_dict[num_all_args][len(args):]:
@@ -366,9 +337,9 @@ def scaled_dot_product_attention(*args, **kwargs):
         assert len(k.shape) == 4, f"Invalid shape for k, got {k.shape}, expected [N, L, H, Ci]"
         assert len(v.shape) == 4, f"Invalid shape for v, got {v.shape}, expected [N, L, H, Co]"
         device = q.device    
-    if return_score:
-        out, prob_list = _naive_sdpa(q,k,v,return_score=True)
-        return out, prob_list
+    if modify or gate_attn:
+        out = _naive_sdpa(q,k,v,enable_truncation=gate_attn,modify=modify)
+        return out
 
     else:
         if BACKEND == 'xformers':

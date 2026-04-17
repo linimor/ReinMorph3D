@@ -153,15 +153,6 @@ class ModulatedSparseTransformerCrossBlock(nn.Module):
 
         if len(kwargs) > 0:
             if kwargs["slat_tfsa_flag"]:
-                # self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx,return_response=True, **kwargs)
-                # self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1,return_response=True, **kwargs)
-                # out_cur, resp_cur, v_cur = self.self_attn(
-                #     x=h, step_idx=step_idx, block_idx=block_idx,
-                #     return_response=True, **kwargs)
-                # out_prev, resp_prev, v_prev = self.self_attn(
-                #     x=h, step_idx=step_idx, block_idx=block_idx,
-                #     cache_idx=-1, return_response=True, **kwargs)
-                
                 h = slat_interp(self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs), self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1, **kwargs), alpha=kwargs["tfsa_alpha"])
             else:
                 h = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs)

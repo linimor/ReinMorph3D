@@ -17,9 +17,9 @@ src_img_path_list = []
 tar_img_path_list = []
 
 for tmp_name in [
-    ["typical_vehicle_pirate_ship.png", "typical_vehicle_excavator.png"]
+    # ["typical_vehicle_pirate_ship.png", "typical_vehicle_excavator.png"]
     # ["bee.png", "red_tree.png"],
-    # ["Super_Big_Mech.png", "bee.png"],
+    ["Super_Big_Mech.png", "bee.png"],
     # ["0004.png", "3015.png"],
     # ["0003.png", "0004.png"],
     # ["Pigsy.png", "Sun_Wukong.png"],
@@ -67,7 +67,7 @@ for idx in range(len(src_img_path_list)):
 
     name = src_name + "+" + tar_name
 
-    morphing_params = {"morphing_num": 50, 
+    morphing_params = {"morphing_num": 10, 
                        "src_load_cache_path": src_save_cache_path,
                         "tar_load_cache_path": tar_save_cache_path, 
                         "init_morphing_flag": False, 
@@ -76,6 +76,10 @@ for idx in range(len(src_img_path_list)):
                         "ss_tfsa_flag": True, 
                         "slat_tfsa_flag": True, 
                         "oc_flag": True,
+                        # ======new attn========
+                        "modify": True,
+                        "gate_attn": True,
+                        "sa_use": True
                         } # When you observe orientation jumps, set oc_flag to True
     save_path = os.path.join(save_dir_path, "3Dmorphing", name)
     os.makedirs(save_path, exist_ok=True)

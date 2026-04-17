@@ -347,12 +347,12 @@ def run_morphing(pipeline, src_img, tar_img, morphing_params, seed, save_path, n
     else:
         gs_video_list = []
         mesh_video_list = []
+
         alpha_array = np.linspace(1, 0, morphing_params["morphing_num"])
 
         for morphing_idx in range(1, morphing_params["morphing_num"] - 1):
-            # morphing_params["alpha"] = alpha_array[morphing_idx]
+            morphing_params["alpha"] = alpha_array[morphing_idx]
             morphing_params["morphing_idx"] = morphing_idx
-            morphing_params["alpha"] = get_adaptive_alpha(morphing_params)
             morphing_params["tfsa_cache_idx"] = morphing_idx - 1
             morphing_params["tfsa_alpha"] = 0.8
             morphing_params["return_intermediate"]=True
@@ -363,6 +363,7 @@ def run_morphing(pipeline, src_img, tar_img, morphing_params, seed, save_path, n
                     morphing_params=morphing_params,
                     seed=seed
                 )
+                # 这里要有一个pipeline.insert_frame占位里面只输入morphing_params和seed
             gs_video_list.append(np.stack(render_utils.render_rot_video(outputs['gaussian'][0], bg_color=bg_color)['color'], axis=0))
             mesh_video_list.append(np.stack(render_utils.render_rot_video(outputs['mesh'][0], bg_color=bg_color)['normal'], axis=0))
 
@@ -370,14 +371,11 @@ def run_morphing(pipeline, src_img, tar_img, morphing_params, seed, save_path, n
                 files = glob(f"{morphing_params['save_cache_path']}/ss_sa_morphing{morphing_params['tfsa_cache_idx']}_*") + glob(f"{morphing_params['save_cache_path']}/slat_sa_morphing{morphing_params['tfsa_cache_idx']}_*")
                 for f in files:
                     os.remove(f)
-            if morphing_params["alpha"] <= 0.0:
-                print(f"[Adaptive Alpha] early stop at morphing_idx={morphing_idx}, total used steps={morphing_idx - 1}")
-                break
+
         if morphing_params["rm_cache"]:
             files = glob(f"{morphing_params['save_cache_path']}/*")
             for f in files:
                 os.remove(f)
-
         gs_video = np.stack(gs_video_list, axis=0)
         mesh_video = np.stack(mesh_video_list, axis=0)
 
@@ -385,27 +383,73 @@ def run_morphing(pipeline, src_img, tar_img, morphing_params, seed, save_path, n
         morphing_gs_video = np.concatenate(np.transpose(gs_video[:, view_idx, ...], (1, 0, 2, 3, 4)), axis=2)
         morphing_mesh_video = np.concatenate(np.transpose(mesh_video[:, view_idx, ...], (1, 0, 2, 3, 4)), axis=2)
         
-        # morphing_idx = np.arange(0, morphing_params["morphing_num"]-2, (morphing_params["morphing_num"]-2)//4).tolist()
-        # if len(morphing_idx) < 5:
-        #     morphing_idx.append(morphing_params["morphing_num"]-3)
-        # show_gs_video = np.concatenate(gs_video[morphing_idx, ...], axis=2)
-        # show_mesh_video = np.concatenate(mesh_video[morphing_idx, ...], axis=2)
-        # imageio.mimsave(f"{save_path}/morphing_{name}.mp4", morphing_gs_video, fps=(morphing_params["morphing_num"]-2)//2)
-        # imageio.mimsave(f"{save_path}/morphing_{name}_normal.mp4", morphing_mesh_video, fps=(morphing_params["morphing_num"]-2)//2)
-        # imageio.mimsave(f"{save_path}/show_{name}.mp4", show_gs_video, fps=30)
-        # imageio.mimsave(f"{save_path}/show_{name}_normal.mp4", show_mesh_video, fps=30)
-        frame_num = len(gs_video_list)
-        morphing_idx = np.arange(0, frame_num-2, (frame_num-2)//4).tolist()
+        morphing_idx = np.arange(0, morphing_params["morphing_num"]-2, (morphing_params["morphing_num"]-2)//4).tolist()
         if len(morphing_idx) < 5:
-            morphing_idx.append(frame_num-3)
+            morphing_idx.append(morphing_params["morphing_num"]-3)
         show_gs_video = np.concatenate(gs_video[morphing_idx, ...], axis=2)
         show_mesh_video = np.concatenate(mesh_video[morphing_idx, ...], axis=2)
-        imageio.mimsave(f"{save_path}/morphing_{name}.mp4", morphing_gs_video, fps=(frame_num-2)//2)
-        imageio.mimsave(f"{save_path}/morphing_{name}_normal.mp4", morphing_mesh_video, fps=(frame_num-2)//2)
+        imageio.mimsave(f"{save_path}/morphing_{name}.mp4", morphing_gs_video, fps=(morphing_params["morphing_num"]-2)//2)
+        imageio.mimsave(f"{save_path}/morphing_{name}_normal.mp4", morphing_mesh_video, fps=(morphing_params["morphing_num"]-2)//2)
         imageio.mimsave(f"{save_path}/show_{name}.mp4", show_gs_video, fps=30)
         imageio.mimsave(f"{save_path}/show_{name}_normal.mp4", show_mesh_video, fps=30)
 
+# def run_morphing_v2(pipeline, src_img, tar_img, morphing_params, seed, save_path, name, bg_color=(1, 1, 1)):
+#     seed_everything(seed)
+#     morphing_params["rm_cache"] = True
+#     if morphing_params["rm_cache"]:
+#         files = glob(f"{morphing_params['save_cache_path']}/*")
+#         for f in files:
+#             os.remove(f)
 
+#     if os.path.exists(f"{save_path}/morphing_{name}.mp4"):
+#         print(f"Skip existing {name}")
+#         return
+#     gs_video_list = []
+#     mesh_video_list = []
+
+#     for morphing_idx in range(1, morphing_params["morphing_num"] - 1):
+#         morphing_params['insert_flag'] = False
+#         morphing_params['delete'] = False
+#         morphing_params['save_h'] = True
+#         morphing_params["morphing_idx"] = morphing_idx
+#         morphing_params["alpha"] = get_adaptive_alpha(morphing_params)
+#         morphing_params["tfsa_cache_idx"] = morphing_idx - 1
+#         morphing_params["tfsa_alpha"] = 0.8
+#         morphing_params["return_intermediate"]=True
+#         with torch.no_grad():
+#             outputs = pipeline.run_morphing(
+#                 src_img=src_img,
+#                 tar_img=tar_img,
+#                 morphing_params=morphing_params,
+#                 seed=seed)
+#             # 这里要有一个pipeline.insert_frame占位里面只输入morphing_params和seed
+#             insert_list = pipeline.insert_frame(
+#                 morphing_params=morphing_params,
+#                 seed=seed)
+#             for output in insert_list:
+#                 gs_video_list.append(np.stack(render_utils.render_rot_video(output['gaussian'][0], bg_color=bg_color)['color'],axis=0))
+#                 mesh_video_list.append(np.stack(render_utils.render_rot_video(output['mesh'][0], bg_color=bg_color)['normal'],axis=0))
+
+#         gs_video_list.append(np.stack(render_utils.render_rot_video(outputs['gaussian'][0], bg_color=bg_color)['color'], axis=0))
+#         mesh_video_list.append(np.stack(render_utils.render_rot_video(outputs['mesh'][0], bg_color=bg_color)['normal'], axis=0))
+#         if morphing_params["alpha"] <= 0.0:
+#             print(f"[Adaptive Alpha] early stop at morphing_idx={morphing_idx}, total used steps={len(gs_video_list)}")
+#             break
+#     gs_video = np.stack(gs_video_list, axis=0)
+#     mesh_video = np.stack(mesh_video_list, axis=0)
+#     view_idx = [0, 20, 40, 60, 80, 100]
+#     morphing_gs_video = np.concatenate(np.transpose(gs_video[:, view_idx, ...], (1, 0, 2, 3, 4)), axis=2)
+#     morphing_mesh_video = np.concatenate(np.transpose(mesh_video[:, view_idx, ...], (1, 0, 2, 3, 4)), axis=2)
+#     frame_num = len(gs_video_list)
+#     morphing_idx = np.arange(0, frame_num-2, (frame_num-2)//4).tolist()
+#     if len(morphing_idx) < 5:
+#         morphing_idx.append(frame_num-3)
+#     show_gs_video = np.concatenate(gs_video[morphing_idx, ...], axis=2)
+#     show_mesh_video = np.concatenate(mesh_video[morphing_idx, ...], axis=2)
+#     imageio.mimsave(f"{save_path}/morphing_{name}.mp4", morphing_gs_video, fps=(frame_num-2)//2)
+#     imageio.mimsave(f"{save_path}/morphing_{name}_normal.mp4", morphing_mesh_video, fps=(frame_num-2)//2)
+#     imageio.mimsave(f"{save_path}/show_{name}.mp4", show_gs_video, fps=30)
+#     imageio.mimsave(f"{save_path}/show_{name}_normal.mp4", show_mesh_video, fps=30)
 # ==============================调整形变插值系数===============================
 
 def _coords_to_occ(coords: torch.Tensor, res: int = 64) -> torch.Tensor:
@@ -451,7 +495,7 @@ def get_adaptive_alpha(morphing_params: dict) -> float:
     morphing_num = morphing_params["morphing_num"]
 
     # 对应你原来 50 帧时约 0.02 的基础步长
-    base_step = 1.0 / max(2, morphing_num)
+    base_step = 1.0 / max(2, morphing_num*2)
     min_step = max(base_step / 8.0, 1e-3)
     max_step = 3.0 * base_step   # 50 帧时约 0.10，接近你说的 0.02->0.04->0.06->0.1
 
