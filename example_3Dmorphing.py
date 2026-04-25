@@ -17,9 +17,9 @@ src_img_path_list = []
 tar_img_path_list = []
 
 for tmp_name in [
-    # ["typical_vehicle_pirate_ship.png", "typical_vehicle_excavator.png"]
+    ["typical_vehicle_pirate_ship.png", "typical_vehicle_excavator.png"]
     # ["bee.png", "red_tree.png"],
-    ["Super_Big_Mech.png", "bee.png"],
+    # ["Super_Big_Mech.png", "bee.png"],
     # ["0004.png", "3015.png"],
     # ["0003.png", "0004.png"],
     # ["Pigsy.png", "Sun_Wukong.png"],
@@ -65,9 +65,9 @@ for idx in range(len(src_img_path_list)):
     if not os.path.exists(f"{tar_save_cache_path}/slat_init.pt"):
         run_morphing_cache(pipeline, tar_img, src_img, morphing_params, SEED, tar_save_path, tar_name)
 
-    name = src_name + "+" + tar_name
+    name = src_name + "+" + tar_name + "_ot_modify_gate"
 
-    morphing_params = {"morphing_num": 10, 
+    morphing_params = {"morphing_num": 50, 
                        "src_load_cache_path": src_save_cache_path,
                         "tar_load_cache_path": tar_save_cache_path, 
                         "init_morphing_flag": False, 
@@ -75,12 +75,28 @@ for idx in range(len(src_img_path_list)):
                         "slat_mca_flag": True, 
                         "ss_tfsa_flag": True, 
                         "slat_tfsa_flag": True, 
-                        "oc_flag": True,
-                        # ======new attn========
+                        "oc_flag": False,
                         "modify": True,
                         "gate_attn": True,
-                        "sa_use": True
-                        } # When you observe orientation jumps, set oc_flag to True
+                        "sa_use": True,
+                        "modify_lambda_scale": 0.8,
+                        "ot_coherence_enabled": True,
+                        "ot_coherence_stage": "ss",
+                        "ot_anchor_patch_size": 4,
+                        "ot_max_anchors": 512,
+                        "ot_cost_pos_weight": 0.3,
+                        "ot_cost_feat_weight": 1.0,
+                        "ot_sinkhorn_eps": 0.05,
+                        "ot_sinkhorn_iters": 80,
+                        "ot_filter_k": 16,
+                        "ot_filter_sigma_pos": 2.0,
+                        "ot_filter_sigma_motion": 2.0,
+                        "ot_filter_lambda": 0.3,
+                        "ot_filter_use_confidence": True,
+                        "ot_filter_start_step_ratio": 1.0,
+                        "ot_filter_end_step_ratio": 0.0,
+                        "ot_debug": False,
+                        }
     save_path = os.path.join(save_dir_path, "3Dmorphing", name)
     os.makedirs(save_path, exist_ok=True)
     save_cache_path = os.path.join(save_path, "cache")

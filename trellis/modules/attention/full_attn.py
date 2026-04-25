@@ -1,377 +1,153 @@
 from typing import *
-import torch
 import math
-import os
-from . import DEBUG, BACKEND
 
-if BACKEND == 'xformers':
+import torch
+
+from . import BACKEND
+
+if BACKEND == "xformers":
     import xformers.ops as xops
-elif BACKEND == 'flash_attn':
+elif BACKEND == "flash_attn":
     import flash_attn
-elif BACKEND == 'sdpa':
+elif BACKEND == "sdpa":
     from torch.nn.functional import scaled_dot_product_attention as sdpa
-elif BACKEND == 'naive':
+elif BACKEND == "naive":
     pass
 else:
     raise ValueError(f"Unknown attention backend: {BACKEND}")
 
 
-__all__ = [
-    'scaled_dot_product_attention',
-]
+__all__ = ["scaled_dot_product_attention", "modify_attn_score"]
 
-# def modify_attn_score(
-#     attn_score: torch.Tensor,
-#     reuse_penalty: float = 0.2,
-#     max_iter: int | None = 10,
-# ) -> torch.Tensor:
-#     """
-#     Iterative conflict-resolved score modification.
 
-#     Args:
-#         attn_score: [B, H, Nq, Nk]
-#             Raw attention logits before softmax, i.e. q @ k^T / sqrt(d).
-#         reuse_penalty: float
-#             Penalty ratio. Loser score on the currently selected key will be reduced by:
-#                 reuse_penalty * winner_score_on_that_key
-#         max_iter: int or None
-#             Max conflict-resolution rounds. If None, defaults to Nk.
-
-#     Returns:
-#         modified_score: [B, H, Nq, Nk]
-#             Score tensor after iterative conflict resolution.
-#     """
-#     assert attn_score.dim() == 4, "attn_score must be [B, H, Nq, Nk]"
-
-#     orig_dtype = attn_score.dtype
-#     score = attn_score.float().clone()
-
-#     B, H, Nq, Nk = score.shape
-#     if max_iter is None:
-#         max_iter = Nk
-
-#     # Flatten B and H to simplify vectorized processing
-#     M = B * H
-#     score = score.reshape(M, Nq, Nk)  # [M, Nq, Nk]
-
-#     device = score.device
-#     neg_inf = torch.tensor(float("-inf"), device=device, dtype=score.dtype)
-
-#     for _ in range(max_iter):
-#         # Step 1: each query selects its current best key
-#         best_val, best_key = score.max(dim=-1)   # [M, Nq], [M, Nq]
-
-#         # Only positive-current-best queries participate
-#         active = best_val > 0                    # [M, Nq]
-#         if not active.any():
-#             break
-
-#         # Step 2: for each key column, find the winner proposal value among current proposers
-#         # winner_val_per_key[m, k] = max best_val of queries that currently choose key k
-#         winner_val_per_key = torch.full(
-#             (M, Nk), neg_inf, device=device, dtype=score.dtype
-#         )
-#         winner_val_per_key.scatter_reduce_(
-#             dim=1,
-#             index=best_key,
-#             src=torch.where(active, best_val, neg_inf),
-#             reduce="amax",
-#             include_self=True,
-#         )  # [M, Nk]
-
-#         # Gather winner value for each query's currently selected key
-#         winner_val_for_query = winner_val_per_key.gather(1, best_key)  # [M, Nq]
-
-#         # Step 3: loser = active and strictly lower than winner on that same selected key
-#         # note: ties are kept as co-winners in this version
-#         loser = active & (best_val < winner_val_for_query)
-
-#         if not loser.any():
-#             break
-
-#         # Step 4: only modify the loser score at its CURRENT selected key
-#         loser_idx = loser.nonzero(as_tuple=False)   # [L, 2] => (m, q)
-#         m_idx = loser_idx[:, 0]
-#         q_idx = loser_idx[:, 1]
-#         k_idx = best_key[m_idx, q_idx]
-
-#         cur_val = score[m_idx, q_idx, k_idx]
-#         win_val = winner_val_for_query[m_idx, q_idx]
-
-#         # subtract winner-based penalty, but do not cross below 0
-#         new_val = torch.clamp(cur_val - reuse_penalty * win_val, min=0.0)
-
-#         score[m_idx, q_idx, k_idx] = new_val
-
-#     score = score.reshape(B, H, Nq, Nk).to(orig_dtype)
-#     return score
 def modify_attn_score(
     attn_score: torch.Tensor,
     lambda_scale: float = 0.3,
     max_passes: int = 4,
     stop_conflict: float = 0.5,
-):
-    """
-    Fast top-1 conflict reduction on attention logits.
-
-    Args:
-        attn_score: [B, H, Lq, Lk]
-        lambda_scale: penalty strength
-        max_passes: max refinement rounds
-        stop_conflict: early stop threshold, e.g. 1.0 or 0.5
-
-    Returns:
-        score: [B, H, Lq, Lk]
-    """
-    orig_dtype = attn_score.dtype
+) -> torch.Tensor:
+    """Reduce many-query-to-one-key conflicts in raw attention logits."""
     score = attn_score.float().clone()
+    dtype = attn_score.dtype
+    bsz, heads, query_len, key_len = score.shape
+    flat = score.reshape(bsz * heads, query_len, key_len)
 
-    B, H, Lq, Lk = score.shape
-    M = B * H
-    score = score.reshape(M, Lq, Lk)   # [M, Lq, Lk]
-
-    device = score.device
-    neg_inf = torch.tensor(float("-inf"), device=device, dtype=score.dtype)
-
-    for _ in range(max_passes):
-        # each query selects its current top-1 key
-        best_val, best_key = score.max(dim=-1)   # [M, Lq], [M, Lq]
-
-        # count how many queries choose each key
-        counts = torch.zeros(M, Lk, device=device, dtype=score.dtype)
-        ones = torch.ones_like(best_val)
-        counts.scatter_add_(dim=1, index=best_key, src=ones)   # [M, Lk]
-
-        # hard conflict only
-        overload = torch.relu(counts - 1.0)                    # [M, Lk]
-        mean_conflict = overload.sum(dim=1).mean()             # scalar
-
-        # early stop
-        if mean_conflict.item() <= stop_conflict:
+    for _ in range(max(int(max_passes), 0)):
+        best_val, best_key = flat.max(dim=-1)
+        counts = torch.zeros(flat.shape[0], key_len, device=flat.device, dtype=flat.dtype)
+        counts.scatter_add_(1, best_key, torch.ones_like(best_val))
+        overload = torch.relu(counts - 1.0)
+        if float(overload.sum(dim=1).mean()) <= float(stop_conflict):
             break
 
-        # winner value on each key column
-        winner_val_per_key = torch.full((M, Lk), neg_inf, device=device, dtype=score.dtype)
-        winner_val_per_key.scatter_reduce_(
-            dim=1,
-            index=best_key,
-            src=best_val,
-            reduce="amax",
-            include_self=True,
-        )   # [M, Lk]
-
-        winner_val_for_query = winner_val_per_key.gather(1, best_key)   # [M, Lq]
-        count_for_query = counts.gather(1, best_key)                    # [M, Lq]
-        overload_for_query = overload.gather(1, best_key)               # [M, Lq]
-
-        # loser: selected a crowded key, not the best responder on that key, and current score > 0
-        loser = (count_for_query > 1) & (best_val < winner_val_for_query) & (best_val > 0)
-
-        if not loser.any():
+        winner = torch.full_like(counts, -torch.inf)
+        winner.scatter_reduce_(1, best_key, best_val, reduce="amax", include_self=True)
+        winner_for_query = winner.gather(1, best_key)
+        crowd_for_query = overload.gather(1, best_key)
+        loser = (counts.gather(1, best_key) > 1) & (best_val < winner_for_query) & (best_val > 0)
+        if not bool(loser.any()):
             break
 
-        loser_idx = loser.nonzero(as_tuple=False)   # [N, 2]
-        m_idx = loser_idx[:, 0]
-        q_idx = loser_idx[:, 1]
+        loser_idx = loser.nonzero(as_tuple=False)
+        m_idx, q_idx = loser_idx[:, 0], loser_idx[:, 1]
         k_idx = best_key[m_idx, q_idx]
+        cur = flat[m_idx, q_idx, k_idx]
+        penalty = float(lambda_scale) * (1.0 + crowd_for_query[m_idx, q_idx]) * winner_for_query[m_idx, q_idx]
+        flat[m_idx, q_idx, k_idx] = torch.clamp(cur - penalty, min=0.0)
 
-        cur_val = score[m_idx, q_idx, k_idx]
-        win_val = winner_val_for_query[m_idx, q_idx]
-        crowd = overload_for_query[m_idx, q_idx]
+    return flat.reshape(bsz, heads, query_len, key_len).to(dtype)
 
-        # stronger penalty when this key is more crowded
-        penalty = lambda_scale * (1.0 + crowd) * win_val
 
-        # positive values after subtraction cannot go below 0
-        new_val = torch.clamp(cur_val - penalty, min=0.0)
+def _score_from_attention(attn_weight: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    score_per_head = attn_weight.max(dim=-1).values.permute(0, 2, 1)
+    head_weight = torch.softmax(out.norm(dim=-1), dim=-1)
+    return (score_per_head * head_weight).sum(dim=-1)
 
-        changed = new_val < cur_val
-        if not changed.any():
-            break
 
-        score[m_idx[changed], q_idx[changed], k_idx[changed]] = new_val[changed]
-
-    score = score.reshape(B, H, Lq, Lk).to(orig_dtype)
-    return score
-# def _naive_sdpa(q, k, v):
-#     """
-#     Naive implementation of scaled dot product attention.
-#     """
-#     q = q.permute(0, 2, 1, 3)   # [N, H, L, C]
-#     k = k.permute(0, 2, 1, 3)   # [N, H, L, C]
-#     v = v.permute(0, 2, 1, 3)   # [N, H, L, C]
-#     scale_factor = 1 / math.sqrt(q.size(-1))
-#     attn_weight = q @ k.transpose(-2, -1) * scale_factor
-#     attn_weight = torch.softmax(attn_weight, dim=-1)
-#     out = attn_weight @ v
-#     out = out.permute(0, 2, 1, 3)   # [N, L, H, C]
-#     return out
-def _naive_sdpa(q, k, v, enable_truncation=False, modify=False):
-    """
-    Naive scaled dot product attention.
-
-    Args:
-        q: [B, Lq, H, C]
-        k: [B, Lk, H, C]
-        v: [B, Lk, H, C]
-        score_reduce: how to reduce over key dimension, default "mean"
-        lambda_scale: reserved scale factor for later use
-
-    Returns:
-        out: [B, Lq, H, C]
-    """
-    # -> [B, H, Lq/Lk, C]
-    q = q.permute(0, 2, 1, 3)   # [B, H, Lq, C]
-    k = k.permute(0, 2, 1, 3)   # [B, H, Lk, C]
-    v = v.permute(0, 2, 1, 3)   # [B, H, Lk, C]
-
-    scale_factor = 1.0 / math.sqrt(q.size(-1))
-
-    # [B, H, Lq, Lk]
-    attn_logits = torch.matmul(q, k.transpose(-2, -1)) * scale_factor
+def _naive_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    return_score: bool = False,
+    modify: bool = False,
+    gate_attn: bool = False,
+    modify_lambda_scale: float = 0.3,
+) -> torch.Tensor:
+    q = q.permute(0, 2, 1, 3)
+    k = k.permute(0, 2, 1, 3)
+    v = v.permute(0, 2, 1, 3)
+    logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(q.shape[-1])
     if modify:
-        attn_logits = modify_attn_score(attn_logits)
-    attn_weight = torch.softmax(attn_logits, dim=-1)
+        logits = modify_attn_score(logits, lambda_scale=modify_lambda_scale)
+    attn_weight = torch.softmax(logits, dim=-1)
+    out = torch.matmul(attn_weight, v)
 
-    # [B, H, Lq, C]
-    out = attn_weight @ v
-
-    # 先保留 per-head 输出，给后面算 head_weight 用
-    out = out.permute(0, 2, 1, 3)   # [B, Lq, H, C]
-
-
-    if enable_truncation:
-        # 1. 计算注意力信息熵 H = -sum(p * log(p))
-        # 加上 1e-8 防止出现 log(0) 导致的 NaN 崩溃
-        # entropy 形状: [B, H, Lq, 1]
+    if gate_attn:
         entropy = -(attn_weight * torch.log(attn_weight + 1e-8)).sum(dim=-1, keepdim=True)
-        max_logits = attn_logits.max(dim=-1, keepdim=True)[0]
-        
-        # 2. 设定信息熵阈值
-        # 提示: 如果 Lk (序列长度) 是 1024，理论最大熵为 ln(1024) ≈ 6.93
-        # 设定一个较高的阈值（如 5.5 或 6.0），只有当分布极其平坦、完全瞎抓时才会拦截
-        truncation_threshold = 6.0 
-        truncation_max_threshold = 1.0
-        # 判定条件：熵大于阈值，说明注意力极度发散，发生了语义错位
-        mask_entropy = entropy > truncation_threshold
-        mask_max = max_logits < truncation_max_threshold
-        mask = mask_entropy & mask_max
-        mask = mask.permute(0, 2, 1, 3)
-        # 4. 执行暴力置零，依靠残差结构保护当前 3D 拓扑
-        if mask is not None:
-            out = out.masked_fill(mask, 0.0)
+        max_logits = logits.max(dim=-1, keepdim=True).values
+        gate = ~((entropy > 6.0) & (max_logits < 1.0))
+        out = out * gate.to(out.dtype)
 
-
+    out = out.permute(0, 2, 1, 3)
+    if return_score:
+        return out, _score_from_attention(attn_weight, out)
     return out
 
 
+@overload
+def scaled_dot_product_attention(qkv: torch.Tensor) -> torch.Tensor: ...
+
 
 @overload
-def scaled_dot_product_attention(qkv: torch.Tensor) -> torch.Tensor:
-    """
-    Apply scaled dot product attention.
+def scaled_dot_product_attention(q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor: ...
 
-    Args:
-        qkv (torch.Tensor): A [N, L, 3, H, C] tensor containing Qs, Ks, and Vs.
-    """
-    ...
 
 @overload
-def scaled_dot_product_attention(q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
-    """
-    Apply scaled dot product attention.
+def scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor: ...
 
-    Args:
-        q (torch.Tensor): A [N, L, H, C] tensor containing Qs.
-        kv (torch.Tensor): A [N, L, 2, H, C] tensor containing Ks and Vs.
-    """
-    ...
-
-@overload
-def scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """
-    Apply scaled dot product attention.
-
-    Args:
-        q (torch.Tensor): A [N, L, H, Ci] tensor containing Qs.
-        k (torch.Tensor): A [N, L, H, Ci] tensor containing Ks.
-        v (torch.Tensor): A [N, L, H, Co] tensor containing Vs.
-
-    Note:
-        k and v are assumed to have the same coordinate map.
-    """
-    ...
 
 def scaled_dot_product_attention(*args, **kwargs):
-    arg_names_dict = {
-        1: ['qkv'],
-        2: ['q', 'kv'],
-        3: ['q', 'k', 'v']
-    }
-    modify = kwargs.get("modify", False)
-    gate_attn = kwargs.get("gate_attn", False)
-    num_all_args = len(args) # + len(kwargs)
-    assert num_all_args in arg_names_dict, f"Invalid number of arguments, got {num_all_args}, expected 1, 2, or 3"
-    for key in arg_names_dict[num_all_args][len(args):]:
-        assert key in kwargs, f"Missing argument {key}"
+    arg_names = {1: ["qkv"], 2: ["q", "kv"], 3: ["q", "k", "v"]}
+    num_args = len(args)
+    assert num_args in arg_names, f"Invalid number of arguments: {num_args}"
 
-    if num_all_args == 1:
-        qkv = args[0] if len(args) > 0 else kwargs['qkv']
-        assert len(qkv.shape) == 5 and qkv.shape[2] == 3, f"Invalid shape for qkv, got {qkv.shape}, expected [N, L, 3, H, C]"
-        device = qkv.device
+    return_score = bool(kwargs.get("return_score", False))
+    modify = bool(kwargs.get("modify", False))
+    gate_attn = bool(kwargs.get("gate_attn", False))
+    modify_lambda_scale = float(kwargs.get("modify_lambda_scale", 0.3))
 
-    elif num_all_args == 2:
-        q = args[0] if len(args) > 0 else kwargs['q']
-        kv = args[1] if len(args) > 1 else kwargs['kv']
-        assert q.shape[0] == kv.shape[0], f"Batch size mismatch, got {q.shape[0]} and {kv.shape[0]}"
-        assert len(q.shape) == 4, f"Invalid shape for q, got {q.shape}, expected [N, L, H, C]"
-        assert len(kv.shape) == 5, f"Invalid shape for kv, got {kv.shape}, expected [N, L, 2, H, C]"
-        device = q.device
-
-    elif num_all_args == 3:
-        q = args[0] if len(args) > 0 else kwargs['q']
-        k = args[1] if len(args) > 1 else kwargs['k']
-        v = args[2] if len(args) > 2 else kwargs['v']
-        assert q.shape[0] == k.shape[0] == v.shape[0], f"Batch size mismatch, got {q.shape[0]}, {k.shape[0]}, and {v.shape[0]}"
-        assert len(q.shape) == 4, f"Invalid shape for q, got {q.shape}, expected [N, L, H, Ci]"
-        assert len(k.shape) == 4, f"Invalid shape for k, got {k.shape}, expected [N, L, H, Ci]"
-        assert len(v.shape) == 4, f"Invalid shape for v, got {v.shape}, expected [N, L, H, Co]"
-        device = q.device    
-    if modify or gate_attn:
-        out = _naive_sdpa(q,k,v,enable_truncation=gate_attn,modify=modify)
-        return out
-
+    if num_args == 1:
+        qkv = args[0]
+        assert qkv.ndim == 5 and qkv.shape[2] == 3, f"Expected [N, L, 3, H, C], got {tuple(qkv.shape)}"
+        q, k, v = qkv.unbind(dim=2)
+    elif num_args == 2:
+        q, kv = args
+        assert q.ndim == 4 and kv.ndim == 5 and kv.shape[2] == 2
+        k, v = kv.unbind(dim=2)
     else:
-        if BACKEND == 'xformers':
-            if num_all_args == 1:
-                q, k, v = qkv.unbind(dim=2)
-            elif num_all_args == 2:
-                k, v = kv.unbind(dim=2)
-            out = xops.memory_efficient_attention(q, k, v)
-        elif BACKEND == 'flash_attn':
-            if num_all_args == 1:
-                out = flash_attn.flash_attn_qkvpacked_func(qkv)
-            elif num_all_args == 2:
-                out = flash_attn.flash_attn_kvpacked_func(q, kv)
-            elif num_all_args == 3:
-                out = flash_attn.flash_attn_func(q, k, v)
-        elif BACKEND == 'sdpa':
-            if num_all_args == 1:
-                q, k, v = qkv.unbind(dim=2)
-            elif num_all_args == 2:
-                k, v = kv.unbind(dim=2)
-            q = q.permute(0, 2, 1, 3)   # [N, H, L, C]
-            k = k.permute(0, 2, 1, 3)   # [N, H, L, C]
-            v = v.permute(0, 2, 1, 3)   # [N, H, L, C]
-            out = sdpa(q, k, v)         # [N, H, L, C]
-            out = out.permute(0, 2, 1, 3)   # [N, L, H, C]
-        elif BACKEND == 'naive':
-            if num_all_args == 1:
-                q, k, v = qkv.unbind(dim=2)
-            elif num_all_args == 2:
-                k, v = kv.unbind(dim=2)
-            out = _naive_sdpa(q, k, v)
-        else:
-            raise ValueError(f"Unknown attention module: {BACKEND}")
-    
-        return out
+        q, k, v = args
+        assert q.ndim == k.ndim == v.ndim == 4
+
+    if return_score or modify or gate_attn or BACKEND == "naive":
+        return _naive_sdpa(
+            q,
+            k,
+            v,
+            return_score=return_score,
+            modify=modify,
+            gate_attn=gate_attn,
+            modify_lambda_scale=modify_lambda_scale,
+        )
+
+    if BACKEND == "xformers":
+        return xops.memory_efficient_attention(q, k, v)
+    if BACKEND == "flash_attn":
+        if num_args == 1:
+            return flash_attn.flash_attn_qkvpacked_func(args[0])
+        if num_args == 2:
+            return flash_attn.flash_attn_kvpacked_func(q, args[1])
+        return flash_attn.flash_attn_func(q, k, v)
+    if BACKEND == "sdpa":
+        out = sdpa(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
+        return out.permute(0, 2, 1, 3)
+    raise ValueError(f"Unknown attention backend: {BACKEND}")

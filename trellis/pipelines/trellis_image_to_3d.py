@@ -13,6 +13,7 @@ from ..modules import sparse as sp
 from ..utils.style_utils import split_and_combine_image, shuffle_image_patches, tile_and_resize_image
 from ..utils.morphing_utils import *
 from ..modules.spatial import patchify
+from ..utils.ot_coherence import build_ot_motion_field, build_ss_anchors
 import cv2
 import os
 from pytorch3d.loss import chamfer_distance
@@ -286,12 +287,59 @@ class TrellisImageTo3DPipeline(Pipeline):
             tar_noise = torch.load(os.path.join(morphing_params["tar_load_cache_path"], "coords_zs_init.pt")).to(self.device)
             noise = feature_interp(src_noise, tar_noise, morphing_params["alpha"])
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        sampler_kwargs = dict(morphing_params)
+        sampler_kwargs["ss_num_steps"] = sampler_params.get("steps", sampler_kwargs.get("ss_num_steps", None))
+        sampler_kwargs["ss_token_grid_size"] = getattr(flow_model, "resolution", reso) // getattr(flow_model, "patch_size", 1)
+
+        if sampler_kwargs.get("ot_coherence_enabled", False) and sampler_kwargs.get("ot_coherence_stage", "ss") == "ss":
+            cache = morphing_params.get("_ot_motion_field_cache", None)
+            if cache is None:
+                try:
+                    src_coords = torch.load(os.path.join(morphing_params["src_load_cache_path"], "coords.pt"), map_location=self.device)
+                    tgt_coords = torch.load(os.path.join(morphing_params["tar_load_cache_path"], "coords.pt"), map_location=self.device)
+                    if src_coords.shape[-1] == 4:
+                        src_coords = src_coords[:, 1:]
+                    if tgt_coords.shape[-1] == 4:
+                        tgt_coords = tgt_coords[:, 1:]
+                    with torch.no_grad():
+                        src_anchors = build_ss_anchors(
+                            src_coords,
+                            grid_size=reso,
+                            patch_size=sampler_kwargs.get("ot_anchor_patch_size", 4),
+                            max_anchors=sampler_kwargs.get("ot_max_anchors", 512),
+                        )
+                        tgt_anchors = build_ss_anchors(
+                            tgt_coords,
+                            grid_size=reso,
+                            patch_size=sampler_kwargs.get("ot_anchor_patch_size", 4),
+                            max_anchors=sampler_kwargs.get("ot_max_anchors", 512),
+                        )
+                        cache = build_ot_motion_field(src_anchors, tgt_anchors, sampler_kwargs)
+                    morphing_params["_ot_motion_field_cache"] = cache
+                    if sampler_kwargs.get("ot_debug", False):
+                        debug_dir = os.path.join("outputs", "debug_ot")
+                        os.makedirs(debug_dir, exist_ok=True)
+                        torch.save({k: v.detach().cpu() for k, v in cache.items()}, os.path.join(debug_dir, "motion_field.pt"))
+                        src_n = int(cache["mask"].sum().item())
+                        disp_norm = cache["disp"].norm(dim=-1)
+                        print(
+                            f"[OT coherence] src anchors={src_n}, "
+                            f"mean/max disp={disp_norm.mean().item():.4f}/{disp_norm.max().item():.4f}, "
+                            f"mean conf={cache['conf'].mean().item():.4f}"
+                        )
+                except Exception as exc:
+                    print(f"[OT coherence] disabled for this run: {exc}")
+                    cache = None
+            if cache is not None:
+                sampler_kwargs["ot_motion_field"] = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in cache.items()}
+        sampler_kwargs.pop("_ot_motion_field_cache", None)
+
         z_s = self.sparse_structure_sampler.sample(
             flow_model,
             noise,
             **cond,
             **sampler_params,
-            **morphing_params,
+            **sampler_kwargs,
             verbose=True
         ).samples
         

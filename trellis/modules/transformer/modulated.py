@@ -6,6 +6,11 @@ from ..attention import MultiHeadAttention
 from ..norm import LayerNorm32
 from .blocks import FeedForwardNet
 from ...utils.morphing_utils import *
+from ...utils.ot_coherence import (
+    get_ot_filter_lambda,
+    get_ss_token_positions,
+    ot_motion_coherent_filter,
+)
 
 class ModulatedTransformerBlock(nn.Module):
     """
@@ -140,7 +145,14 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
         if len(kwargs) > 0:
             if kwargs["ss_tfsa_flag"]:
-                h = feature_interp(self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs), self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1, **kwargs), kwargs["tfsa_alpha"], interp_mode="linear")
+                h_cur, score_cur = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, return_score=True, **kwargs)
+                h_prev, score_prev = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, cache_idx=-1, return_score=True, **kwargs)
+                # score_diff = score_prev - score_cur
+                # lambda_ = 5.0
+                # delta_alpha = 0.3 * torch.tanh(lambda_ * score_diff)
+                # delta_alpha = delta_alpha.unsqueeze(-1)  # [B, Lq, 1]
+                # tfsa_alpha = torch.clamp(kwargs["tfsa_alpha"] - delta_alpha, 0.0, 1.0)
+                h = feature_interp(h_cur, h_prev, kwargs["tfsa_alpha"], interp_mode="linear")
             else:
                 h = self.self_attn(x=h, step_idx=step_idx, block_idx=block_idx, **kwargs)
         else:
@@ -152,7 +164,58 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
         if len(kwargs) > 0:
             if kwargs["ss_mca_flag"]:
-                h = feature_interp(self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, modify=kwargs["modify"], gate_attn=kwargs["gate_attn"]), self.cross_attn(x=h, context=kwargs["tar_cond"], step_idx=step_idx, block_idx=block_idx, modify=kwargs["modify"], gate_attn=kwargs["gate_attn"]), kwargs["alpha"], interp_mode="linear")
+                attn_kwargs = {
+                    "modify": kwargs.get("modify", False),
+                    "gate_attn": kwargs.get("gate_attn", False),
+                    "modify_lambda_scale": kwargs.get("modify_lambda_scale", 0.3),
+                }
+                h_src = self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, **attn_kwargs)
+                h_tar = self.cross_attn(x=h, context=kwargs["tar_cond"], step_idx=step_idx, block_idx=block_idx, **attn_kwargs)
+                # print(score_src.shape) #[1, 4096]
+                # src_score = score_src          # [B, Lq]
+                # tar_score = score_tar          # [B, Lq]
+                # score_diff = tar_score - src_score   # [B, Lq]
+                # lambda_ = 5.0
+                # delta_alpha = 0.3 * torch.tanh(lambda_ * score_diff)   # [B, Lq]
+                # delta_alpha = delta_alpha.unsqueeze(-1)  # [B, Lq, 1]
+                # alpha = torch.clamp(kwargs["alpha"] - delta_alpha, 0.0, 1.0)
+                h = feature_interp(h_src, h_tar, kwargs["alpha"], interp_mode="linear")
+                if kwargs.get("ot_coherence_enabled", False) and kwargs.get("ot_coherence_stage", "ss") == "ss":
+                    motion_field = kwargs.get("ot_motion_field", None)
+                    if motion_field is not None:
+                        try:
+                            alpha = float(kwargs["alpha"])
+                            src_center = motion_field["src_center"].to(device=h.device, dtype=h.dtype)
+                            disp = motion_field["disp"].to(device=h.device, dtype=h.dtype)
+                            anchor_pos = src_center + (1.0 - alpha) * disp
+                            lam = get_ot_filter_lambda(
+                                kwargs.get("ot_filter_lambda", 0.3),
+                                step_idx,
+                                kwargs.get("ss_num_steps", kwargs.get("steps", None)),
+                                kwargs.get("ot_filter_start_step_ratio", 1.0),
+                                kwargs.get("ot_filter_end_step_ratio", 0.0),
+                            )
+                            token_pos = get_ss_token_positions(
+                                h,
+                                ss_coords=kwargs.get("ss_coords", None),
+                                grid_size=kwargs.get("ss_token_grid_size", None),
+                            )
+                            h = ot_motion_coherent_filter(
+                                out=h,
+                                token_pos=token_pos,
+                                anchor_pos=anchor_pos,
+                                anchor_motion=disp,
+                                anchor_conf=motion_field.get("conf", None),
+                                anchor_mask=motion_field.get("mask", None),
+                                k_neighbors=kwargs.get("ot_filter_k", 16),
+                                sigma_pos=kwargs.get("ot_filter_sigma_pos", 2.0),
+                                sigma_motion=kwargs.get("ot_filter_sigma_motion", 2.0),
+                                lambda0=lam,
+                                use_confidence=kwargs.get("ot_filter_use_confidence", True),
+                            )
+                        except Exception as exc:
+                            if kwargs.get("ot_debug", False):
+                                print(f"[OT coherence] fallback to raw SS MCA residual: {exc}")
             else:
                 h = self.cross_attn(x=h, context=context, step_idx=step_idx, block_idx=block_idx, **kwargs)
         else:
