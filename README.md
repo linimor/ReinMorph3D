@@ -1,10 +1,10 @@
 # ReinMorph3D: Harnessing the Power of Structured Latent for Stable 3D Morphing
 
 <!-- TODO: Replace placeholders with the final author list, affiliations, and paper links. -->
-**Authors:** Author One, Author Two, Author Three  
+**Authors:** Xintao Wang, Linmao Li, Wenrui Li, Hengyu Man, Wangmeng Zuo, Xiaopeng Fan  <br>
 **Affiliations:** Institution / Lab  
 
-[Project Page](https://linimor.github.io/ReinMorph3D/reinmorph3d_page/) | [Paper](#) | [Code](https://github.com/linimor/ReinMorph3D) | [Demo](#)
+[Project Page](https://linimor.github.io/reinmorph_page/#) | [Paper](#) | [Code](https://github.com/linimor/ReinMorph3D)
 
 ## Overview
 
@@ -16,7 +16,7 @@ ReinMorph3D is a research project for stable 3D morphing through structured late
 
 ## Installation
 
-Tested on **Ubuntu 20.04**, **Python 3.10**, **NVIDIA A6000**, **CUDA 11.8**, and **PyTorch 2.4.0**. Follow the steps below to set up the environment.
+Tested on **Ubuntu 20.04**, **Python 3.10**, **NVIDIA GTX4090**, **CUDA 11.8**, and **PyTorch 2.4.0**. Follow the steps below to set up the environment.
 
 1. Clone the repo:
 
@@ -71,7 +71,7 @@ python ./example_3Dstyle_transfer.py
 ```bibtex
 @article{reinmorph3d,
   title   = {ReinMorph3D: Harnessing the Power of Structured Latent for Stable 3D Morphing},
-  author  = {TODO},
+  author  = {Xintao Wang, Linmao Li, Wenrui Li, Hengyu Man, Wangmeng Zuo, Xiaopeng Fan},
   journal = {TODO},
   year    = {2026}
 }
